@@ -56,6 +56,7 @@ export const SqliteClient = Context.GenericTag<SqliteClient>("@effect/sql-sqlite
  */
 export interface SqliteClientConfig {
   readonly database: string
+  readonly encryptionKey?: string | undefined
   readonly spanAttributes?: Record<string, unknown> | undefined
   readonly transformResultNames?: ((str: string) => string) | undefined
   readonly transformQueryNames?: ((str: string) => string) | undefined
@@ -76,7 +77,7 @@ export const asyncQuery: FiberRef.FiberRef<boolean> = globalValue(
  */
 export const withAsyncQuery = <R, E, A>(effect: Effect.Effect<A, E, R>) => Effect.locally(effect, asyncQuery, true)
 
-interface SqliteConnection extends Connection {}
+interface SqliteConnection extends Connection { }
 
 /**
  * @category constructor
@@ -85,13 +86,13 @@ interface SqliteConnection extends Connection {}
 export const make = (
   options: SqliteClientConfig
 ): Effect.Effect<SqliteClient, never, Scope.Scope | Reactivity.Reactivity> =>
-  Effect.gen(function*() {
+  Effect.gen(function* () {
     const compiler = Statement.makeCompilerSqlite(options.transformQueryNames)
     const transformRows = options.transformResultNames ?
       Statement.defaultTransforms(options.transformResultNames).array :
       undefined
 
-    const makeConnection = Effect.gen(function*() {
+    const makeConnection = Effect.gen(function* () {
       const db = ExpoSqlite.openDatabaseSync(options.database)
       yield* Effect.addFinalizer(() =>
         Effect.sync(() => {
@@ -114,7 +115,10 @@ export const make = (
               catch: (cause) => new SqlError({ cause, message: "Failed to execute statement (async)" })
             })
           }
-          return Effect.succeed(db.getAllSync<any>(sql, ...(params as SQLiteVariadicBindParams)))
+          return Effect.try({
+            try: () => db.getAllSync<any>(sql, ...(params as SQLiteVariadicBindParams)),
+            catch: (cause) => new SqlError({ cause, message: "Failed to execute statement" })
+          })
         })
 
       return identity<SqliteConnection>({
@@ -161,17 +165,27 @@ export const make = (
       )
     )
 
-    return Object.assign(
-      (yield* Client.make({
+    const spanAttributes: ReadonlyArray<readonly [string, unknown]> = [
+      ...(options.spanAttributes ? Object.entries(options.spanAttributes) : []),
+      [ATTR_DB_SYSTEM_NAME, "sqlite"]
+    ]
+
+    const sql = Statement.make(acquirer, compiler, spanAttributes, transformRows)
+
+    const client = yield* sql`PRAGMA key = ${options.encryptionKey!}`.pipe(
+      Effect.orDie,
+      Effect.when(() => options.encryptionKey !== undefined && options.encryptionKey !== ""),
+      Effect.andThen(Client.make({
         acquirer,
         compiler,
         transactionAcquirer,
-        spanAttributes: [
-          ...(options.spanAttributes ? Object.entries(options.spanAttributes) : []),
-          [ATTR_DB_SYSTEM_NAME, "sqlite"]
-        ],
+        spanAttributes,
         transformRows
-      })) as SqliteClient,
+      }))
+    )
+
+    return Object.assign(
+      client as SqliteClient,
       {
         [TypeId]: TypeId,
         config: options
@@ -203,7 +217,7 @@ export const layerConfig = (
  */
 export const layer = (
   config: SqliteClientConfig
-): Layer.Layer<SqliteClient | Client.SqlClient, ConfigError> =>
+): Layer.Layer<SqliteClient | Client.SqlClient> =>
   Layer.scopedContext(
     Effect.map(make(config), (client) =>
       Context.make(SqliteClient, client).pipe(

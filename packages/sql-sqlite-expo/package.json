@@ -56,6 +56,16 @@
     "@effect/experimental": "workspace:^",
     "@effect/sql": "workspace:^",
     "effect": "workspace:^",
-    "expo-sqlite": "~15.2.10"
+    "expo-sqlite": "~15.2.10",
+    "expo-secure-store": "*",
+    "expo-crypto": "*"
+  },
+  "peerDependenciesMeta": {
+    "expo-secure-store": {
+      "optional": true
+    },
+    "expo-crypto": {
+      "optional": true
+    }
   }
 }
